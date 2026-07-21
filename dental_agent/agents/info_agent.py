@@ -1,60 +1,54 @@
-from langchain_xai import ChatXAI
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import ToolMessage
 from langgraph.prebuilt import ToolNode
-from dental_agent.config.settings import XAI_API_KEY, MODEL_NAME, TEMPERATURE
+from dental_agent.config.settings import GROQ_API_KEY, MODEL_NAME, TEMPERATURE
 from dental_agent.models.state import AppointmentState
-from dental_agent.tools.csv_reader import get_patient_appointments
-from dental_agent.tools.csv_writer import cancel_appointment
-from dental_agent.utils import sanitize_messages
+from dental_agent.tools.csv_reader import (
+    get_available_slots,
+    get_patient_appointments,
+    check_slot_availability,
+    list_doctors_by_specialization,
+)
+from dental_agent.utils import guard_tool_response, log_transition, sanitize_messages
 
-CANCEL_TOOLS = [get_patient_appointments, cancel_appointment]
+INFO_TOOLS = [
+    get_available_slots,
+    get_patient_appointments,
+    check_slot_availability,
+    list_doctors_by_specialization,
+]
 
-CANCEL_SYSTEM = """You are the Cancellation Agent for a dental appointment management system.
+INFO_SYSTEM = """Information agent.
+Use one tool only when real schedule data is needed. If parameters are missing, ask one concise question.
+After a tool result, answer from that result and do not call tools again.
+Valid specializations: general_dentist, oral_surgeon, orthodontist, cosmetic_dentist, prosthodontist, pediatric_dentist, emergency_dentist.
+Date format: M/D/YYYY H:MM."""
 
-Your ONLY job is to cancel existing appointments.
-
-## Workflow
-1. Collect REQUIRED information:
-   - patient_id  : numeric patient ID
-   - date_slot   : the specific slot to cancel in M/D/YYYY H:MM format
-
-2. If the patient does not know the exact slot, call get_patient_appointments(patient_id)
-   to list their bookings, then ask which one to cancel.
-
-3. Confirm with the user before proceeding:
-   "Are you sure you want to cancel the appointment at {date_slot} with {doctor_name}? (yes/no)"
-
-4. On user confirmation, call cancel_appointment(patient_id, date_slot).
-
-5. Inform the user of the outcome.
-
-## Rules
-- Always confirm before cancelling — ask "yes/no" explicitly.
-- If the patient has no appointments, inform them kindly.
-- Do NOT cancel if the patient_id does not match the booking.
-- If the user already confirmed in their message (e.g. "yes, cancel it"), skip asking again.
-
-## Date Format
-M/D/YYYY H:MM (e.g., 5/8/2026 8:30)
-"""
-
-CANCEL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", CANCEL_SYSTEM),
+INFO_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", INFO_SYSTEM),
     ("placeholder", "{messages}"),
 ])
 
-cancellation_tool_node = ToolNode(tools=CANCEL_TOOLS)
+info_tool_node = ToolNode(tools=INFO_TOOLS)
 
 
-def cancellation_agent_node(state: AppointmentState) -> dict:
-    llm = ChatXAI(
-        api_key=XAI_API_KEY,
+def info_agent_node(state: AppointmentState) -> dict:
+    after_tool = bool(state["messages"]) and isinstance(state["messages"][-1], ToolMessage)
+    llm = ChatGroq(
+        api_key=GROQ_API_KEY,
         model=MODEL_NAME,
         temperature=TEMPERATURE,
-    ).bind_tools(CANCEL_TOOLS)
+    )
+    if not after_tool:
+        llm = llm.bind_tools(INFO_TOOLS)
 
-    chain = CANCEL_PROMPT | llm
+    chain = INFO_PROMPT | llm
     response = chain.invoke({"messages": sanitize_messages(state["messages"])})
+    if not after_tool:
+        response = guard_tool_response(response, state["messages"], "info_agent")
+    else:
+        log_transition("info_agent", "END")
     return {
         "messages": [response],
         "final_response": response.content if not response.tool_calls else None,

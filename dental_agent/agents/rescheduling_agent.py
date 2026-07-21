@@ -1,44 +1,21 @@
-from langchain_xai import ChatXAI
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import ToolMessage
 from langgraph.prebuilt import ToolNode
-from dental_agent.config.settings import XAI_API_KEY, MODEL_NAME, TEMPERATURE
+from dental_agent.config.settings import GROQ_API_KEY, MODEL_NAME, TEMPERATURE
 from dental_agent.models.state import AppointmentState
 from dental_agent.tools.csv_reader import get_patient_appointments, get_available_slots
 from dental_agent.tools.csv_writer import reschedule_appointment
-from dental_agent.utils import sanitize_messages
+from dental_agent.utils import guard_tool_response, log_transition, sanitize_messages
 
 RESCHEDULE_TOOLS = [get_patient_appointments, get_available_slots, reschedule_appointment]
 
-RESCHEDULE_SYSTEM = """You are the Rescheduling Agent for a dental appointment management system.
-
-Your ONLY job is to move an existing appointment to a new time slot.
-
-## Workflow
-1. Collect REQUIRED information:
-   - patient_id         : numeric patient ID
-   - current_date_slot  : the existing appointment to move (M/D/YYYY H:MM)
-   - new_date_slot      : the desired new slot (M/D/YYYY H:MM)
-   - doctor_name        : doctor name (from the existing booking)
-
-2. If the patient does not know their current slot, call get_patient_appointments(patient_id)
-   to list their bookings, then ask which one to reschedule.
-
-3. If the patient does not know the desired new slot, call get_available_slots(doctor_name=...)
-   to show options with the same doctor, then let them pick.
-
-4. Call reschedule_appointment(patient_id, current_date_slot, new_date_slot, doctor_name).
-
-5. Confirm the reschedule: old slot → new slot, doctor name.
-
-## Rules
-- The new slot is with the SAME doctor by default unless the user explicitly requests a different one.
-- If the user wants a different doctor, ask for the new doctor's name and check availability.
-- Always show clear confirmation of what changed (old → new).
-- If reschedule fails (slot taken, not found), explain why and offer alternatives.
-
-## Date Format
-M/D/YYYY H:MM (e.g., 5/10/2026 9:00)
-"""
+RESCHEDULE_SYSTEM = """Rescheduling agent.
+Reschedule only when patient_id, current_date_slot, new_date_slot, and doctor_name are known.
+Ask one concise question for missing details.
+Use at most one lookup tool when patient_id or doctor_name is known.
+After a tool result, answer from that result and do not call tools again.
+Date format: M/D/YYYY H:MM."""
 
 RESCHEDULE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", RESCHEDULE_SYSTEM),
@@ -49,14 +26,21 @@ rescheduling_tool_node = ToolNode(tools=RESCHEDULE_TOOLS)
 
 
 def rescheduling_agent_node(state: AppointmentState) -> dict:
-    llm = ChatXAI(
-        api_key=XAI_API_KEY,
+    after_tool = bool(state["messages"]) and isinstance(state["messages"][-1], ToolMessage)
+    llm = ChatGroq(
+        api_key=GROQ_API_KEY,
         model=MODEL_NAME,
         temperature=TEMPERATURE,
-    ).bind_tools(RESCHEDULE_TOOLS)
+    )
+    if not after_tool:
+        llm = llm.bind_tools(RESCHEDULE_TOOLS)
 
     chain = RESCHEDULE_PROMPT | llm
     response = chain.invoke({"messages": sanitize_messages(state["messages"])})
+    if not after_tool:
+        response = guard_tool_response(response, state["messages"], "rescheduling_agent")
+    else:
+        log_transition("rescheduling_agent", "END")
     return {
         "messages": [response],
         "final_response": response.content if not response.tool_calls else None,

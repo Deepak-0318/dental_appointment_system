@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 CSV_PATH = str(BASE_DIR / "doctor_availability.csv")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0"))
 
 VALID_SPECIALIZATIONS = [

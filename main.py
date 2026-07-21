@@ -1,8 +1,8 @@
-from dotnev import load_dotenv
+from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_core.messages import HumanMessage , AIMessageChunk
-from dental_agent.agent import dental_graph
+from langchain_core.messages import HumanMessage, AIMessageChunk
+from dental_agent.workflows.graph import dental_graph
 
 BANNER = """
         DENTAL APPOINTMENT MANAGEMENT SYSTEM
@@ -33,8 +33,7 @@ def run():
         try:
             for event_type, data in dental_graph.stream(
                 {"messages": history},
-                stream_mode=["meesages", 'values'],
-                config={"recursion_limit": 20}
+                stream_mode=["messages", "values"],
             ):
                 if event_type == "messages":
                     chunk , meta = data
